@@ -1,0 +1,31 @@
+#!ipxe
+
+echo Google Compute Engine - iPXE boot via metadata
+echo CPU: ${cpuvendor} ${cpumodel}
+
+echo Prawal log
+
+echo prawal-ifstat
+ifstat
+
+echo prawal-dhcp
+dhcp
+
+echo prawal-ping
+# ping ${gateway}
+
+echo prawal-chain
+chain http://boot.ipxe.org/demo/boot.php
+
+# set base http://tinycorelinux.net/12.x/x86/release/distribution_files/
+# kernel ${base}/vmlinuz64 initrd=rootfs.gz initrd=modules64.gz
+# initrd ${base}/rootfs.gz
+# initrd ${base}/modules64.gz
+# echo Going to boot
+# boot
+# 
+# dhcp ||
+# route ||
+# chain -ar http://metadata.google.internal/computeMetadata/v1/instance/attributes/ipxeboot ||
+# ifstat
+
