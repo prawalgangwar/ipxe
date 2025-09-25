@@ -215,7 +215,7 @@ install :
 # Version number calculations
 #
 ifneq ($(wildcard ../.git),)
-VERSIONS := $(shell git describe --tags --always --long --abbrev=1 --match "v*")
+VERSIONS := v1.21.1-1064-gb0727
 VERSION_TUPLE	:= $(subst ., ,$(subst -, ,$(patsubst v%,%,$(VERSIONS))))
 VERSION_MAJOR	:= $(word 1,$(VERSION_TUPLE))
 VERSION_MINOR	:= $(word 2,$(VERSION_TUPLE))

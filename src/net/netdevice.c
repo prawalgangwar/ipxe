@@ -206,6 +206,8 @@ void netdev_rx_unfreeze ( struct net_device *netdev ) {
  */
 void netdev_link_err ( struct net_device *netdev, int rc ) {
 
+	DBGC ( netdev->priv, "NETDEV %s link is up\n", netdev->name );
+
 	/* Stop link block timer */
 	stop_timer ( &netdev->link_block );
 
