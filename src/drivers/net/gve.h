@@ -820,7 +820,7 @@ struct gve_queue {
 
 	/* Tracks the current gen bit of compl_q */
 	uint8_t cur_gen_bit;
-	uint8_t cmptl_counter;
+	uint32_t cmptl_counter;
 
 	/** Queue page list */
 	struct gve_qpl qpl;

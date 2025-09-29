@@ -1740,6 +1740,11 @@ static void gve_poll_rx_dqo ( struct net_device *netdev ) {
 	// TODO: prawal, handle packets spanning multiple buffers for RDA
 	// TODO: prawal, add QPL handling as well
 	while ( 1 ) {
+		/* Never exceed the producer index */
+		// TODO: prawal, check how to handle this
+		if ( rx->cons >= rx->prod ) {
+			break;
+		}
 
 		/* Read next possible completion */
 		index = ( rx->cmptl_counter & ( rx->count - 1 ) );
@@ -1754,6 +1759,19 @@ static void gve_poll_rx_dqo ( struct net_device *netdev ) {
 		len = ( le16_to_cpu ( cmplt->packet_len ));
 		DBGC ( gve, "GVE %p RX %#04x len %#04zx id %#04x\n", 
 				gve, index, len, cmplt->buf_id );
+
+		/* Sanity check */
+		if ( len > GVE_PAGE_SIZE ) {
+			rc = -EIO;
+			netdev_rx_err ( netdev, NULL, rc );
+			// Move the consumer index forward
+			rx->cons++;
+			/* Advance consumer index */
+			rx->cmptl_counter++;
+			if ( ( rx->cmptl_counter & ( rx->count - 1 ) ) == 0 )
+				rx->cur_gen_bit ^= 1;
+			continue;
+		}
 
 		/* Allocate and populate I/O buffer */
 		if ( cmplt->rx_error == 0 ) {
