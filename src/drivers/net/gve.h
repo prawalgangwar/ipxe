@@ -190,24 +190,6 @@ struct gve_device_option {
 	uint32_t required_features_mask;
 } __attribute__ (( packed ));
 
-/** DQO RDA device option */
-struct gve_device_option_dqo_rda {
-	/** Supported features mask */
-	uint32_t supported_features_mask;
-	/** Reserved */
-	uint32_t reserved;
-} __attribute__ (( packed ));
-
-/** DQO QPL device option */
-struct gve_device_option_dqo_qpl {
-	/** Supported features mask */
-	uint32_t supported_features_mask;
-	/** Transmit pages per QPL */
-	uint16_t tx_pages_per_qpl;
-	/** Receive pages per QPL */
-	uint16_t rx_pages_per_qpl;
-};
-
 /** Configure device resources command */
 #define GVE_ADMIN_CONFIGURE 0x0002
 
@@ -370,7 +352,6 @@ union gve_admin_command {
  */
 enum gve_queue_format {
 	GVE_QUEUE_FORMAT_UNSPECIFIED	= 0x0,
-	GVE_GQI_RDA_FORMAT		= 0x1,
 	GVE_GQI_QPL_FORMAT		= 0x2,
 	GVE_DQO_RDA_FORMAT		= 0x3,
 	GVE_DQO_QPL_FORMAT		= 0x4,
@@ -747,14 +728,10 @@ struct gve_rx_completion_dqo {
 	/* Should be zero. */
 	uint16_t buffer_queue_id: 1;
 
-	uint16_t header_len: 10; /* TODO: Only when header split is enabled */
-	uint16_t rsc: 1; /* TODO: Only when rsc is enabled */
-	uint16_t split_header: 1; /* TODO: Only when header split is enabled */
-	uint16_t reserved3: 4;
+	uint16_t reserved3;
 
 	uint8_t descriptor_done: 1;
-	uint8_t end_of_packet: 1; /* TODO: Always 1 when RSC is disabled */
-	uint8_t header_buffer_overflow: 1; /* TODO: Only when header split is enabled */
+	uint8_t reserved4: 2;
 	uint8_t l3_l4_processed: 1;
 	uint8_t csum_ip_err: 1;
 	uint8_t csum_l4_err: 1;
@@ -766,14 +743,9 @@ struct gve_rx_completion_dqo {
 	uint16_t reserved5;
 	uint16_t buf_id; /* Buffer ID which was sent on the buffer queue. */
 
-	union { /* TODO: Only when rsc is enabled */
-		/* Packet checksum. */
-		uint16_t raw_cs;
-		/* Segment length for RSC packets. */
-		uint16_t rsc_seg_len;
-	}; 
+	uint16_t reserved6;
 	uint32_t hash;
-	uint8_t reserved6[12];
+	uint8_t reserved7[12];
 } __attribute__ (( packed ));
 
 

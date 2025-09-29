@@ -2,10 +2,11 @@
 set -e 
 set -x
 
-cd ~/code/prawalgangwar/ipxe/src 
+cd ~/code/prawalgangwar/ipxe/src
 
-# make CONFIG=cloud EMBED=config/cloud/gce.ipxe bin-x86_64-pcbios/ipxe.usb bin-x86_64-efi/ipxe.usb DEBUG=gve,netdevice -j20
-make CONFIG=cloud EMBED=config/cloud/gce.ipxe bin-x86_64-pcbios/ipxe.usb bin-x86_64-efi/ipxe.usb DEBUG=gve -j20
+# make clean 
+# make V=1 CONFIG=cloud EMBED=config/cloud/gce.ipxe bin-x86_64-pcbios/ipxe.usb bin-x86_64-efi/ipxe.usb DEBUG=gve,netdevice -j20
+make CONFIG=cloud EMBED=config/cloud/gce.ipxe bin-x86_64-pcbios/ipxe.usb bin-x86_64-efi/ipxe.usb -j20
 
 cd ~/code/prawalgangwar/ipxe/contrib/cloud
 
@@ -52,6 +53,7 @@ gcloud compute images create "ipxe-$(date +%Y%m%d)-uefi-x86-64" \
 date=$(date +%Y%m%d)
 rand=$(openssl rand -hex 4)
 gcloud compute instances create ipxe-vm-$rand --image-project=prawalg-project --image=ipxe-$date-uefi-x86-64 --metadata-from-file=ipxeboot=gce.ipxe --network-interface nic-type=GVNIC --machine-type=c4-standard-2 --boot-disk-size=10GB
+# gcloud compute instances create ipxe-vm-$rand --image-project=prawalg-project --image=ipxe-$date-uefi-x86-64 --metadata-from-file=ipxeboot=gce.ipxe --network-interface nic-type=GVNIC --machine-type=n4-standard-2 --boot-disk-size=10GB
 
 # gcloud compute instances create ipxe-vm-$rand --image-project=prawalg-project --image=ipxe-$date-uefi-x86-64 --metadata-from-file=ipxeboot=gce.ipxe --network-interface nic-type=GVNIC --machine-type=c4-standard-2 --boot-disk-size=10GB
 # a4-highgpu-8g

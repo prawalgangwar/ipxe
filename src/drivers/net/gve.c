@@ -126,8 +126,7 @@ FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 static inline bool gve_is_gqi(struct gve_nic *gve)
 {
-	return gve->queue_format == GVE_GQI_RDA_FORMAT ||
-		gve->queue_format == GVE_GQI_QPL_FORMAT;
+	return gve->queue_format == GVE_GQI_QPL_FORMAT;
 }
 
 static inline bool gve_is_qpl(struct gve_nic *gve)
@@ -278,7 +277,7 @@ static void gve_admin_enable ( struct gve_nic *gve ) {
 
 	/* Reset queue */
 	admin->prod = 0;
-
+	// TODO: prawal validate this???
 	/* Program queue addresses and capabilities */
 	if ( gve->revision < 1 ) {
 		base = dma ( &admin->map, admin->cmd );
@@ -511,7 +510,7 @@ static int gve_describe ( struct gve_nic *gve ) {
 	}
 
 	/* Choose the queue format in a priority order:
-	 * DqoRda, DqoQpl, GqiRda, GqiQpl. Use GqiQpl as default.
+	 * DqoRda, DqoQpl, GqiQpl. Use GqiQpl as default.
 	 */
 	if ( available_formats & ( 1 << GVE_DEV_OPT_ID_DQO_RDA ) ) {
 		gve->queue_format = GVE_DQO_RDA_FORMAT;
@@ -521,22 +520,14 @@ static int gve_describe ( struct gve_nic *gve ) {
 		gve->queue_format = GVE_DQO_QPL_FORMAT;
 		DBGC ( gve, "GVE %p using DQO QPL format\n", gve );
 	}
-	else if ( available_formats & ( 1 << GVE_DEV_OPT_ID_GQI_RDA ) ) {
-		gve->queue_format = GVE_GQI_RDA_FORMAT;
-		DBGC ( gve, "GVE %p using GQI RDA format\n", gve );
-	}
 	else if ( available_formats & ( 1 << GVE_DEV_OPT_ID_GQI_QPL ) ) {
 		gve->queue_format = GVE_GQI_QPL_FORMAT;
 		DBGC ( gve, "GVE %p using GQI QPL format\n", gve );
 	}
 	else {
-		gve->queue_format = GVE_GQI_QPL_FORMAT;
 		DBGC ( gve, "GVE %p no supported queue format found\n", gve );
 		return -ENOTSUP;
 	}
-
-	// gve->queue_format = GVE_GQI_QPL_FORMAT;
-	// DBGC ( gve, "GVE %p using GQI QPL format\n", gve );
 
 	/* Extract queue parameters */
 	gve->events.count = be16_to_cpu ( desc->counters );
@@ -733,12 +724,11 @@ static void gve_create_rx_param ( struct gve_nic *gve, struct gve_queue *queue,
 		create->rx_ring_size = cpu_to_be16 ( queue->count );
 		create->rx_buff_ring_size = cpu_to_be16 ( queue->count );
 		create->enable_rsc = 0; /* RSC not supported */
-		// create->header_buffer_size = cpu_to_be16 ( GVE_HEADER_BUF_SIZE );
 	}
 
 	if ( gve_is_qpl(gve) ) {
 		create->qpl_id = cpu_to_be32 ( type->qpl );
-	} else { 
+	} else {
 		create->qpl_id = cpu_to_be32 ( GVE_RAW_ADDRESSING_QPL_ID );
 	}
 }
@@ -885,23 +875,17 @@ static void gve_free_shared ( struct gve_nic *gve ) {
 static int gve_alloc_qpl ( struct gve_nic *gve, struct gve_qpl *qpl,
 			   uint32_t id, unsigned int buffers ) {
 	size_t len;
-	size_t buf_size = ( gve_is_gqi(gve) ) ? 
-			  GVE_BUF_SIZE : GVE_PAGE_SIZE;
 
 	/* Record ID */
 	qpl->id = id;
 
 	/* Calculate number of pages required */
-	if ( gve_is_gqi(gve) ) {
-		build_assert ( GVE_BUF_SIZE <= GVE_PAGE_SIZE );
-		qpl->count = ( ( buffers + GVE_BUF_PER_PAGE - 1 ) / GVE_BUF_PER_PAGE );
-	} else {
-		qpl->count = buffers;
-	}
+	build_assert ( GVE_BUF_SIZE <= GVE_PAGE_SIZE );
+	qpl->count = ( ( buffers + GVE_BUF_PER_PAGE - 1 ) / GVE_BUF_PER_PAGE );
 	assert ( qpl->count <= GVE_QPL_MAX );
 
 	/* Allocate pages (as a single block) */
-	len = ( qpl->count * buf_size );
+	len = ( qpl->count * GVE_PAGE_SIZE );
 	qpl->data = dma_umalloc ( gve->dma, &qpl->map, len, GVE_ALIGN );
 	if ( ! qpl->data )
 		return -ENOMEM;
@@ -918,11 +902,8 @@ static int gve_alloc_qpl ( struct gve_nic *gve, struct gve_qpl *qpl,
  * @v gve		GVE device
  * @v qpl		Queue page list
  */
-static void gve_free_qpl ( struct gve_nic *gve,
-			   struct gve_qpl *qpl ) {
-	size_t buf_size = ( gve_is_gqi(gve) ) ?
-			  GVE_BUF_SIZE : GVE_PAGE_SIZE;
-	size_t len = ( qpl->count * buf_size );
+static void gve_free_qpl ( struct gve_qpl *qpl ) {
+	size_t len = ( qpl->count * GVE_PAGE_SIZE );
 
 	/* Free pages */
 	dma_ufree ( &qpl->map, qpl->data, len );
@@ -957,24 +938,6 @@ gve_buffer ( struct gve_queue *queue, unsigned int index ) {
 
 	/* Pages are currently allocated as a single contiguous block */
 	return ( queue->qpl.data + gve_address ( queue, index ) );
-}
-
-/**
- * Get DQO buffer address
- *
- * @v queue		Descriptor queue
- * @v index		Buffer index
- * @ret addr		Buffer address
- */
-static inline __attribute__ (( always_inline )) void *
-gve_dqo_buffer ( struct gve_queue *queue, unsigned int index ) {
-
-	/* We allocate sufficient pages for the maximum fill level of
-	 * buffers, and reuse the pages in strict rotation as we
-	 * progress through the queue.
-	 */
-	index &= ( queue->fill - 1 );
-	return ( queue->qpl.data + ( index * GVE_PAGE_SIZE ) );
 }
 
 /**
@@ -1086,15 +1049,15 @@ static int gve_alloc_queue ( struct gve_nic *gve, struct gve_queue *queue ) {
 
 	/* Populate descriptor offsets for GQ */
 	if ( gve_is_qpl(gve) ) {
-		buf = ( queue->desc.raw + type->gqi_desc_len - sizeof ( *buf ) );
-		for ( i = 0 ; i < queue->count ; i++ ) {
-			buf->addr = cpu_to_be64 ( gve_address ( queue, i ) );
-			buf = ( ( ( void * ) buf ) + type->gqi_desc_len );
+		if ( gve_is_gqi(gve) ) {
+			buf = ( queue->desc.raw + type->gqi_desc_len - sizeof ( *buf ) );
+			for ( i = 0 ; i < queue->count ; i++ ) {
+				buf->addr = cpu_to_be64 ( gve_address ( queue, i ) );
+				buf = ( ( ( void * ) buf ) + type->gqi_desc_len );
+			}
 		}
+		// TODO: prawal populate descriptor offsets for DQ QPL Rx and Tx
 	}
-	// TODO: prawal populate descriptor offsets for DQ RDA
-	// TODO: prawal populate descriptor offsets for DQ QPL
-	// TODO: prawal populate descriptor offsets for GQ RDA
 
 	return 0;
 
@@ -1106,7 +1069,7 @@ static int gve_alloc_queue ( struct gve_nic *gve, struct gve_queue *queue ) {
 	dma_ufree ( &queue->desc_map, queue->desc.raw, desc_len );
  err_desc:
 	if ( gve_is_qpl(gve) )
-		gve_free_qpl ( gve, &queue->qpl );
+		gve_free_qpl ( &queue->qpl );
  err_qpl:
  err_sanity:
 	return rc;
@@ -1144,7 +1107,7 @@ static void gve_free_queue ( struct gve_nic *gve, struct gve_queue *queue ) {
 
 	/* Free queue page list if not using RDA */
 	if ( gve_is_qpl(gve) )
-		gve_free_qpl ( gve, &queue->qpl );
+		gve_free_qpl ( &queue->qpl );
 }
 
 /**
@@ -1170,13 +1133,11 @@ static int gve_start ( struct gve_nic *gve ) {
 			netdev_tx_complete_err ( netdev, iobuf, -ECANCELED );
 	}
 
-	// TODO: prawal, correct the queue length
+	/* Invalidate receive completions */
 	if ( gve_is_gqi(gve) ) {
-		/* Invalidate receive completions */
 		memset ( rx->cmplt.raw, 0, ( rx->count * rx->type->gqi_cmplt_len ) );
 	} else { /* DQO */
-		/* Invalidate receive completions */
-		memset ( rx->desc.raw, 0, ( rx->count * rx->type->dqo_desc_len ) );
+		memset ( rx->cmplt.raw, 0, ( rx->count * rx->type->dqo_cmplt_len ) );
 	}
 
 	/* Reset receive sequence */
@@ -1410,7 +1371,6 @@ static void gve_close ( struct net_device *netdev ) {
  * @v iobuf		I/O buffer
  * @ret rc		Return status code
  */
-// TODO: add support for GQ RDA here
 static int gve_transmit_gqi ( struct net_device *netdev, struct io_buffer *iobuf ) {
 	struct gve_nic *gve = netdev->priv;
 	struct gve_queue *tx = &gve->tx;
@@ -1420,10 +1380,6 @@ static int gve_transmit_gqi ( struct net_device *netdev, struct io_buffer *iobuf
 	size_t frag_len;
 	size_t offset;
 	size_t len;
-
-	/* Do nothing if queues are not yet set up */
-	if ( ! netdev_link_ok ( netdev ) )
-		return -ENETDOWN;
 
 	/* Defer packet if there is no space in the transmit ring */
 	len = iob_len ( iobuf );
@@ -1509,7 +1465,7 @@ static void gve_poll_tx_dqo ( struct net_device *netdev ) {
 			gve, index, tag, cmplt->type, cmplt->generation);
 
 		uint16_t type = cmplt->type;
-		
+
 		if (type == GVE_COMPL_TYPE_DQO_DESC) {
 			/* This is the last descriptor fetched by HW plus one */
 			uint16_t tx_head = le16_to_cpu(cmplt->tx_head);
@@ -1522,6 +1478,8 @@ static void gve_poll_tx_dqo ( struct net_device *netdev ) {
 				gve, compl_tag);
 		
 			/* Complete I/O buffer */
+			// TODO: prawal check if this will work correctly for out of order completions
+			// TODO: implement this for QPL as well
 			iobuf = gve->tx_iobuf[compl_tag % GVE_TX_FILL];
 			gve->tx_iobuf[compl_tag % GVE_TX_FILL] = NULL;
 			if ( iobuf )
@@ -1580,11 +1538,9 @@ static int gve_transmit_dqo ( struct net_device *netdev,
 	void *buf;
 	uint64_t dma_addr;
 
-	/* Do nothing if queues are not yet set up */
-	if ( ! netdev_link_ok ( netdev ) )
-		return -ENETDOWN;
-
 	/* Defer packet if there is no space in the transmit ring */
+
+	// TODO: prawal, write this condition for QPL 
 	if ( ( tx->prod - tx->cons ) >= tx->fill ) {
 		/* Ring is full, try to free some space */
 		gve_poll_tx_dqo ( netdev );
@@ -1593,10 +1549,15 @@ static int gve_transmit_dqo ( struct net_device *netdev,
 		return 0;
 	}
 
+	// TODO: copy the loop from gqi code, descide the frag_len based on if QPL or RDA 
+	// OR
+	// TODO: write two if functions, one for QPL and one for RDA
+
 	/* Get buffer and DMA address */
 	len = iob_len ( iobuf );
 	if ( gve_is_qpl(gve) ) {
-		buf = gve_dqo_buffer ( tx, tx->prod );
+		// TODO: this is totally wrong
+		buf = gve_buffer ( tx, tx->prod );
 		dma_addr = dma ( &tx->qpl.map, buf );
 		memcpy ( buf, iobuf->data, len );
 	} else {
@@ -1642,6 +1603,10 @@ static int gve_transmit_dqo ( struct net_device *netdev,
  */
 static int gve_transmit ( struct net_device *netdev, struct io_buffer *iobuf ) {
 	struct gve_nic *gve = netdev->priv;
+
+	/* Do nothing if queues are not yet set up */
+	if ( ! netdev_link_ok ( netdev ) )
+		return -ENETDOWN;
 
 	if ( gve_is_gqi(gve) )
 		return gve_transmit_gqi ( netdev, iobuf );
@@ -1768,11 +1733,12 @@ static void gve_poll_rx_dqo ( struct net_device *netdev ) {
 	struct gve_rx_completion_dqo *cmplt;
 	struct io_buffer *iobuf = NULL; 
 	unsigned int index;
-	uint16_t id __unused;
 	size_t len;
 	int rc;
 
 	/* Process receive completions */
+	// TODO: prawal, handle packets spanning multiple buffers for RDA
+	// TODO: prawal, add QPL handling as well
 	while ( 1 ) {
 
 		/* Read next possible completion */
@@ -1786,9 +1752,8 @@ static void gve_poll_rx_dqo ( struct net_device *netdev ) {
 
 		/* Parse completion */
 		len = ( le16_to_cpu ( cmplt->packet_len ));
-		id = le16_to_cpu ( cmplt->buf_id ); /* Must be read */
 		DBGC ( gve, "GVE %p RX %#04x len %#04zx id %#04x\n", 
-				gve, index, len, id );
+				gve, index, len, cmplt->buf_id );
 
 		/* Allocate and populate I/O buffer */
 		if ( cmplt->rx_error == 0 ) {
@@ -1867,6 +1832,8 @@ static void gve_refill_rx_dqo ( struct net_device *netdev ) {
 		memset ( desc, 0, sizeof ( *desc ) );
 
 		// Allocate a new buffer
+		// TODO: prawal pre-allocate buffers and use a similar logic as QPL 
+		// TODO: add support for QPL as well
 		size_t buf_size = GVE_PAGE_SIZE;
 		void *buf = dma_umalloc ( gve->dma, &rx->rxbuf_map[index], buf_size, GVE_ALIGN );
 		desc->buf_addr = cpu_to_le64 ( dma ( &rx->rxbuf_map[index], buf ) );
