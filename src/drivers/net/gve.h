@@ -63,12 +63,25 @@ struct google_mac {
 #define GVE_CFG_DEVSTAT 0x0000
 #define GVE_CFG_DEVSTAT_RESET 0x00000010UL	/**< Device is reset */
 
+/** Device status flags */
+enum gve_device_status_flags {
+	GVE_DEVICE_STATUS_RESET_MASK		= 0x2,
+	GVE_DEVICE_STATUS_LINK_STATUS_MASK	= 0x4,
+	GVE_DEVICE_STATUS_REPORT_STATS_MASK	= 0x8,
+	GVE_DEVICE_STATUS_DEVICE_IS_RESET	= 0x10,
+};
+
 /** Driver status */
 #define GVE_CFG_DRVSTAT 0x0004
 #define GVE_CFG_DRVSTAT_RUN 0x00000001UL	/**< Run admin queue */
 
 /** Maximum time to wait for reset */
 #define GVE_RESET_MAX_WAIT_MS 500
+
+/** Driver status flags */
+enum gve_driver_status_flags {
+	GVE_DRIVER_STATUS_RESET_MASK		= 0x2,
+};
 
 /** Admin queue page frame number (for older devices) */
 #define GVE_CFG_ADMIN_PFN 0x0010
@@ -139,24 +152,42 @@ struct gve_admin_describe {
 
 /** Device descriptor */
 struct gve_device_descriptor {
+	/** Maximum number of pages that can be registered */
+	uint64_t max_registered_pages;
 	/** Reserved */
-	uint8_t reserved_a[10];
+	uint16_t reserved1;
 	/** Number of transmit queue entries */
 	uint16_t tx_count;
 	/** Number of receive queue entries */
 	uint16_t rx_count;
-	/** Reserved */
-	uint8_t reserved_b[2];
+	/** Default number of queues */
+	uint16_t default_num_queues;
 	/** Maximum transmit unit */
 	uint16_t mtu;
 	/** Number of event counters */
 	uint16_t counters;
-	/** Reserved */
-	uint8_t reserved_c[4];
+	/** Transmit pages per QPL */
+	uint16_t tx_pages_per_qpl;
+	/** Receive pages per QPL */
+	uint16_t rx_pages_per_qpl;
 	/** MAC address */
 	struct google_mac mac;
+	/** Number of device options */
+	uint16_t num_device_options;
+	/** Total length of descriptor */
+	uint16_t total_length;
 	/** Reserved */
-	uint8_t reserved_d[10];
+	uint8_t reserved3[6];
+} __attribute__ (( packed ));
+
+/** Device option */
+struct gve_device_option {
+	/** Option ID */
+	uint16_t option_id;
+	/** Option length */
+	uint16_t option_length;
+	/** Required features mask */
+	uint32_t required_features_mask;
 } __attribute__ (( packed ));
 
 /** Configure device resources command */
@@ -176,6 +207,12 @@ struct gve_admin_configure {
 	uint32_t num_irqs;
 	/** IRQ doorbell stride */
 	uint32_t irq_stride;
+	/** MSI-X base index for notification blocks */
+	uint32_t ntfy_blk_msix_base_idx;
+	/** Queue format */
+	uint8_t queue_format;
+	/** Padding */
+	uint8_t padding[7];
 } __attribute__ (( packed ));
 
 /** Register page list command */
@@ -201,7 +238,7 @@ struct gve_admin_register {
  * This is a policy decision.  Must be sufficient to allow for both
  * the transmit and receive queue fill levels.
  */
-#define GVE_QPL_MAX 32
+#define GVE_QPL_MAX 64
 
 /** Page list */
 struct gve_pages {
@@ -231,6 +268,14 @@ struct gve_admin_create_tx {
 	uint32_t qpl_id;
 	/** Notification channel ID */
 	uint32_t notify_id;
+	/** Transmit completion ring address */
+	uint64_t comp_ring_addr;
+	/** Transmit ring size */
+	uint16_t ring_size;
+	/** Transmit completion ring size */
+	uint16_t comp_ring_size;
+	/** Padding */
+	uint8_t padding[4];
 } __attribute__ (( packed ));
 
 /** Create receive queue command */
@@ -250,16 +295,26 @@ struct gve_admin_create_rx {
 	uint32_t notify_id;
 	/** Queue resources address */
 	uint64_t res;
-	/** Completion ring address */
+	/** Completion ring address, rx_desc_ring_addr, information about the final descriptor*/ 
 	uint64_t cmplt;
-	/** Descriptor ring address */
+	/** Descriptor ring address, rx_data_ring_addr, buffer address list */
 	uint64_t desc;
 	/** Queue page list ID */
 	uint32_t qpl_id;
-	/** Reserved */
-	uint8_t reserved_b[2];
+	/** Rx ring size */
+	uint16_t rx_ring_size;
 	/** Packet buffer size */
 	uint16_t bufsz;
+	/** Receive buffer ring size */
+	uint16_t rx_buff_ring_size;
+	/** Enable RSC */
+	uint8_t enable_rsc;
+	/** Padding */
+	uint8_t padding1;
+	/** Header buffer size */
+	uint16_t header_buffer_size;
+	/** Padding */
+	uint8_t padding2[2];
 } __attribute__ (( packed ));
 
 /** Destroy transmit queue command */
@@ -290,6 +345,20 @@ union gve_admin_command {
 	/** Padding */
 	uint8_t pad[64];
 };
+
+/* GVE_QUEUE_FORMAT_UNSPECIFIED must be zero since 0 is the default value
+ * when the entire configure_device_resources command is zeroed out and the
+ * queue_format is not specified.
+ */
+enum gve_queue_format {
+	GVE_QUEUE_FORMAT_UNSPECIFIED	= 0x0,
+	GVE_GQI_QPL_FORMAT		= 0x2,
+	GVE_DQO_RDA_FORMAT		= 0x3,
+	GVE_DQO_QPL_FORMAT		= 0x4,
+};
+
+/** Raw addressing QPL ID */
+#define GVE_RAW_ADDRESSING_QPL_ID 0xFFFFFFFF
 
 /**
  * Number of admin queue commands
@@ -323,6 +392,8 @@ struct gve_scratch {
 		struct gve_device_descriptor desc;
 		/** Page address list */
 		struct gve_pages pages;
+		/** Raw data */
+		uint8_t raw[GVE_PAGE_SIZE];
 	} *buf;
 	/** DMA mapping */
 	struct dma_mapping map;
@@ -501,7 +572,7 @@ struct gve_tx_packet {
 } __attribute__ (( packed ));
 
 /** A transmit descriptor */
-struct gve_tx_descriptor {
+struct gve_tx_descriptor_gqi {
 	/** Packet descriptor */
 	struct gve_tx_packet pkt;
 	/** Buffer descriptor */
@@ -530,7 +601,7 @@ struct gve_tx_descriptor {
 #define GVE_RX_IRQ 1
 
 /** A receive descriptor */
-struct gve_rx_descriptor {
+struct gve_rx_descriptor_gqi {
 	/** Buffer descriptor */
 	struct gve_buffer buf;
 } __attribute__ (( packed ));
@@ -545,6 +616,63 @@ struct gve_rx_packet {
 	uint8_t seq;
 } __attribute__ (( packed ));
 
+/** DQO TX packet descriptor */
+struct gve_tx_descriptor_dqo {
+	/** Buffer address */
+	uint64_t buf_addr;
+
+	/** Descriptor type. Must be GVE_TX_PKT_DESC_DTYPE_DQO (0xc) */
+	uint8_t dtype: 5;
+
+	/* Denotes the last descriptor of a packet. */
+	uint8_t end_of_packet: 1;
+	uint8_t checksum_offload_enable: 1;
+
+	/* If set, will generate a descriptor completion for this descriptor. */
+	uint8_t report_event: 1;
+	uint8_t reserved0;
+	uint16_t reserved1;
+
+	/* The TX completion associated with this packet will contain this tag. */
+	uint16_t compl_tag;
+	uint16_t buf_size: 14;
+	uint16_t reserved2: 2;
+} __attribute__ (( packed ));
+
+
+#define GVE_COMPL_TYPE_DQO_PKT 0x2 /* Packet completion */
+#define GVE_COMPL_TYPE_DQO_DESC 0x4 /* Descriptor completion */
+#define GVE_COMPL_TYPE_DQO_MISS 0x1 /* Miss path completion */
+#define GVE_COMPL_TYPE_DQO_REINJECTION 0x3 /* Re-injection completion */
+
+
+/** DQO TX completion descriptor */
+struct gve_tx_completion_dqo {
+	/* For types 0-4 this is the TX queue ID associated with this
+	 * completion.
+	 */
+	uint16_t id: 11;
+
+	/* See: GVE_COMPL_TYPE_DQO* */
+	uint16_t type: 3;
+	uint16_t reserved0: 1;
+
+	/* Flipped by HW to notify the descriptor is populated. */
+	uint16_t generation: 1;
+	union {
+		/* For descriptor completions, this is the last index fetched
+		 * by HW + 1.
+		 */
+		uint16_t tx_head;
+
+		/* For packet completions, this is the completion tag set on the
+		 * TX packet descriptors.
+		 */
+		uint16_t completion_tag;
+	};
+	uint32_t reserved1;
+} __attribute__ (( packed ));
+
 /** Receive error */
 #define GVE_RXF_ERROR 0x08
 
@@ -555,12 +683,80 @@ struct gve_rx_packet {
 #define GVE_RX_SEQ_MASK 0x07
 
 /** A receive completion descriptor */
-struct gve_rx_completion {
+struct gve_rx_completion_gqi {
 	/** Reserved */
 	uint8_t reserved[60];
 	/** Packet descriptor */
 	struct gve_rx_packet pkt;
 } __attribute__ (( packed ));
+
+/* Descriptor to post buffers to HW on buffer queue. */
+struct gve_rx_descriptor_dqo {
+	uint16_t buf_id; /* ID returned in Rx completion descriptor */
+	uint16_t reserved0;
+	uint32_t reserved1;
+	uint64_t buf_addr; /* DMA address of the buffer */
+	uint64_t header_buf_addr;
+	uint64_t reserved2;
+} __attribute__ (( packed ));
+
+/* Descriptor for HW to notify SW of new packets received on RX queue. */
+struct gve_rx_completion_dqo {
+	/* Must be 1 */
+	uint8_t rxdid: 4;
+	uint8_t reserved0: 4;
+
+	/* Packet originated from this system rather than the network. */
+	uint8_t loopback: 1;
+	/* Set when IPv6 packet contains a destination options header or routing
+	 * header.
+	 */
+	uint8_t ipv6_ex_add: 1;
+	/* Invalid packet was received. */
+	uint8_t rx_error: 1;
+	uint8_t reserved1: 5;
+
+	uint16_t packet_type: 10;
+	uint16_t ip_hdr_err: 1;
+	uint16_t udp_len_err: 1;
+	uint16_t raw_cs_invalid: 1;
+	uint16_t reserved2: 3;
+
+	uint16_t packet_len: 14;
+	/* Flipped by HW to notify the descriptor is populated. */
+	uint16_t generation: 1;
+	/* Should be zero. */
+	uint16_t buffer_queue_id: 1;
+
+	uint16_t reserved3;
+
+	uint8_t descriptor_done: 1;
+	uint8_t reserved4: 2;
+	uint8_t l3_l4_processed: 1;
+	uint8_t csum_ip_err: 1;
+	uint8_t csum_l4_err: 1;
+	uint8_t csum_external_ip_err: 1;
+	uint8_t csum_external_udp_err: 1;
+
+	uint8_t status_error1;
+
+	uint16_t reserved5;
+	uint16_t buf_id; /* Buffer ID which was sent on the buffer queue. */
+
+	uint16_t reserved6;
+	uint32_t hash;
+	uint8_t reserved7[12];
+} __attribute__ (( packed ));
+
+
+/** DQO device options */
+enum gve_dev_opt_id {
+	GVE_DEV_OPT_ID_GQI_RAW_ADDRESSING = 0x1,
+	GVE_DEV_OPT_ID_GQI_RDA = 0x2,
+	GVE_DEV_OPT_ID_GQI_QPL = 0x3,
+	GVE_DEV_OPT_ID_DQO_RDA = 0x4,
+	GVE_DEV_OPT_ID_DQO_QPL = 0x7
+};
 
 /** Padding at the start of all received packets */
 #define GVE_RX_PAD 2
@@ -570,19 +766,29 @@ struct gve_queue {
 	/** Descriptor ring */
 	union {
 		/** Transmit descriptors */
-		struct gve_tx_descriptor *tx;
+		struct gve_tx_descriptor_gqi *gqi_tx_desc;
 		/** Receive descriptors */
-		struct gve_rx_descriptor *rx;
+		struct gve_rx_descriptor_gqi *gqi_rx_desc;
+		/** DQO transmit packet descriptors */
+		struct gve_tx_descriptor_dqo *dqo_tx_desc;
+		/** DQO receive buffer descriptors */
+		struct gve_rx_descriptor_dqo *dqo_rx_buf;
 		/** Raw data */
 		void *raw;
 	} desc;
+
 	/** Completion ring */
 	union {
 		/** Receive completions */
-		struct gve_rx_completion *rx;
+		struct gve_rx_completion_gqi *gqi_rx;
+		/** DQO transmit completions */
+		struct gve_tx_completion_dqo *dqo_tx;
+		/** DQO receive completion descriptors */
+		struct gve_rx_completion_dqo *dqo_rx;
 		/** Raw data */
 		void *raw;
 	} cmplt;
+
 	/** Queue resources */
 	struct gve_resources *res;
 
@@ -599,6 +805,8 @@ struct gve_queue {
 	struct dma_mapping cmplt_map;
 	/** Queue resources mapping */
 	struct dma_mapping res_map;
+	/** Rx buffer queue mapping */
+	struct dma_mapping rxbuf_map[1024];
 
 	/** Doorbell register */
 	volatile uint32_t *db;
@@ -609,6 +817,10 @@ struct gve_queue {
 	uint32_t prod;
 	/** Consumer counter */
 	uint32_t cons;
+
+	/* Tracks the current gen bit of compl_q */
+	uint8_t cur_gen_bit;
+	uint32_t cmptl_counter;
 
 	/** Queue page list */
 	struct gve_qpl qpl;
@@ -621,10 +833,11 @@ struct gve_queue_type {
 	/**
 	 * Populate command parameters to create queue
 	 *
+	 * @v gve		GVE device
 	 * @v queue		Descriptor queue
 	 * @v cmd		Admin queue command
 	 */
-	void ( * param ) ( struct gve_queue *queue,
+	void ( * param ) ( struct gve_nic *gve, struct gve_queue *queue,
 			   union gve_admin_command *cmd );
 	/** Queue page list ID */
 	uint32_t qpl;
@@ -632,10 +845,14 @@ struct gve_queue_type {
 	uint8_t irq;
 	/** Maximum fill level */
 	uint8_t fill;
-	/** Descriptor size */
-	uint8_t desc_len;
-	/** Completion size */
-	uint8_t cmplt_len;
+	/** GQ descriptor size */
+	uint8_t gqi_desc_len;
+	/** GQ completion size */
+	uint8_t gqi_cmplt_len;
+	/** DQO descriptor size */
+	uint8_t dqo_desc_len;
+	/** DQO dcompletion size */
+	uint8_t dqo_cmplt_len;
 	/** Command to create queue */
 	uint8_t create;
 	/** Command to destroy queue */
@@ -650,6 +867,8 @@ struct gve_nic {
 	void *db;
 	/** PCI revision */
 	uint8_t revision;
+	/** Queue format */
+	enum gve_queue_format queue_format;
 	/** Network device */
 	struct net_device *netdev;
 	/** DMA device */
