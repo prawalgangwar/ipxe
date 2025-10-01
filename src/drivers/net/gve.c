@@ -149,31 +149,24 @@ static inline bool gve_is_qpl(struct gve_nic *gve)
  * @ret rc		Return status code
  */
 static int gve_reset ( struct gve_nic *gve ) {
-	uint32_t val;
+	uint32_t pfn;
 	unsigned int i;
 
-	if ( gve->revision < 1 ) {
-		/* Skip reset if admin queue page frame number is already
-		 * clear.  Triggering a reset on an already-reset device seems
-		 * to cause a delayed reset to be scheduled.  This can cause
-		 * the device to end up in a reset loop, where each attempt to
-		 * recover from reset triggers another reset a few seconds
-		 * later.
-		 */
-		val = readl ( gve->cfg + GVE_CFG_ADMIN_PFN );
-		if ( ! val ) {
-			DBGC ( gve, "GVE %p skipping reset\n", gve );
-			return 0;
-		}
-
-		/* Clear admin queue page frame number */
-		writel ( 0, gve->cfg + GVE_CFG_ADMIN_PFN );
-	} else {
-		/* Set driver reset bit */
-		val = readl ( gve->cfg + GVE_CFG_DRVSTAT );
-		writel ( bswap_32 ( val | GVE_DRIVER_STATUS_RESET_MASK ),
-			 gve->cfg + GVE_CFG_DRVSTAT );
+	/* Skip reset if admin queue page frame number is already
+	 * clear.  Triggering a reset on an already-reset device seems
+	 * to cause a delayed reset to be scheduled.  This can cause
+	 * the device to end up in a reset loop, where each attempt to
+	 * recover from reset triggers another reset a few seconds
+	 * later.
+	 */
+	pfn = readl ( gve->cfg + GVE_CFG_ADMIN_PFN );
+	if ( ! pfn ) {
+		DBGC ( gve, "GVE %p skipping reset\n", gve );
+		return 0;
 	}
+
+	/* Clear admin queue page frame number */
+	writel ( 0, gve->cfg + GVE_CFG_ADMIN_PFN );
 	wmb();
 
 	/* Wait for device to reset */
@@ -182,18 +175,14 @@ static int gve_reset ( struct gve_nic *gve ) {
 		/* Delay */
 		mdelay ( 1 );
 
-		if ( gve->revision < 1 ) {
-			/* Check for reset completion */
-			if ( ! readl ( gve->cfg + GVE_CFG_ADMIN_PFN ) )
-				return 0;
-		} else {
-			if ( readl ( gve->cfg + GVE_CFG_DEVSTAT ) &
-			     bswap_32 ( GVE_DEVICE_STATUS_DEVICE_IS_RESET ) )
-				return 0;
-		}
+		/* Check for reset completion */
+		pfn = readl ( gve->cfg + GVE_CFG_ADMIN_PFN );
+		if ( ! pfn )
+			return 0;
 	}
 
-	DBGC ( gve, "GVE %p reset timed out (devstat %#08x)\n", gve,
+	DBGC ( gve, "GVE %p reset timed out (PFN %#08x devstat %#08x)\n",
+	       gve, bswap_32 ( pfn ),
 	       bswap_32 ( readl ( gve->cfg + GVE_CFG_DEVSTAT ) ) );
 	return -ETIMEDOUT;
 }
@@ -277,20 +266,18 @@ static void gve_admin_enable ( struct gve_nic *gve ) {
 
 	/* Reset queue */
 	admin->prod = 0;
-	// TODO: prawal validate this???
+
 	/* Program queue addresses and capabilities */
-	if ( gve->revision < 1 ) {
-		base = dma ( &admin->map, admin->cmd );
-		writel ( bswap_32 ( base / GVE_PAGE_SIZE ),
-			 gve->cfg + GVE_CFG_ADMIN_PFN );
+	base = dma ( &admin->map, admin->cmd );
+	writel ( bswap_32 ( base / GVE_PAGE_SIZE ),
+		 gve->cfg + GVE_CFG_ADMIN_PFN );
+	writel ( bswap_32 ( base & 0xffffffffUL ),
+		 gve->cfg + GVE_CFG_ADMIN_BASE_LO );
+	if ( sizeof ( base ) > sizeof ( uint32_t ) ) {
+		writel ( bswap_32 ( ( ( uint64_t ) base ) >> 32 ),
+			 gve->cfg + GVE_CFG_ADMIN_BASE_HI );
 	} else {
-		base = dma ( &admin->map, admin->cmd );
-		writel ( bswap_32 ( base & 0xffffffffUL ),
-			 gve->cfg + GVE_CFG_ADMIN_BASE_LO );
-		if ( sizeof ( base ) > sizeof ( uint32_t ) ) {
-			writel ( bswap_32 ( ( ( uint64_t ) base ) >> 32 ),
-				 gve->cfg + GVE_CFG_ADMIN_BASE_HI );
-		}
+		writel ( 0, gve->cfg + GVE_CFG_ADMIN_BASE_HI );
 	}
 	writel ( bswap_16 ( admin_len ), gve->cfg + GVE_CFG_ADMIN_LEN );
 	writel ( bswap_32 ( GVE_CFG_DRVSTAT_RUN ), gve->cfg + GVE_CFG_DRVSTAT );
@@ -535,6 +522,9 @@ static int gve_describe ( struct gve_nic *gve ) {
 	gve->rx.count = be16_to_cpu ( desc->rx_count );
 	DBGC ( gve, "GVE %p using %d TX, %d RX, %d events\n",
 	       gve, gve->tx.count, gve->rx.count, gve->events.count );
+	DBGC ( gve, "GVE %p rx_pages_per_qpl %d tx_pages_per_qpl %d\n",
+	       gve, be16_to_cpu ( desc->rx_pages_per_qpl ),
+	       be16_to_cpu ( desc->tx_pages_per_qpl ) );
 
 	/* Extract network parameters */
 	build_assert ( sizeof ( desc->mac ) == ETH_ALEN );
@@ -1004,8 +994,8 @@ static int gve_alloc_queue ( struct gve_nic *gve, struct gve_queue *queue ) {
 	queue->fill = type->fill;
 	if ( queue->fill > queue->count )
 		queue->fill = queue->count;
-	DBGC ( gve, "GVE %p %s using QPL %#08x with %d/%d descriptors\n",
-	       gve, type->name, type->qpl, queue->fill, queue->count );
+	DBGC ( gve, "GVE %p %s using %d/%d descriptors\n",
+	       gve, type->name, queue->fill, queue->count );
 
 	/* Allocate queue page list if not using RDA */
 	if ( gve_is_qpl(gve) ) {
@@ -1047,7 +1037,7 @@ static int gve_alloc_queue ( struct gve_nic *gve, struct gve_queue *queue ) {
 	}
 	memset ( queue->res, 0, res_len );
 
-	/* Populate descriptor offsets for GQ */
+	/* Populate descriptor offsets for GQ, the same for DQ is done at the time of desc assignment */
 	if ( gve_is_qpl(gve) ) {
 		if ( gve_is_gqi(gve) ) {
 			buf = ( queue->desc.raw + type->gqi_desc_len - sizeof ( *buf ) );
@@ -1056,7 +1046,6 @@ static int gve_alloc_queue ( struct gve_nic *gve, struct gve_queue *queue ) {
 				buf = ( ( ( void * ) buf ) + type->gqi_desc_len );
 			}
 		}
-		// TODO: prawal populate descriptor offsets for DQ QPL Rx and Tx
 	}
 
 	return 0;
@@ -1476,10 +1465,8 @@ static void gve_poll_tx_dqo ( struct net_device *netdev ) {
 			uint16_t compl_tag = le16_to_cpu(cmplt->completion_tag);
 			DBGC( gve, "GVE %p TX DQO_PKT compl_tag %#04x\n",
 				gve, compl_tag);
-		
+
 			/* Complete I/O buffer */
-			// TODO: prawal check if this will work correctly for out of order completions
-			// TODO: implement this for QPL as well
 			iobuf = gve->tx_iobuf[compl_tag % GVE_TX_FILL];
 			gve->tx_iobuf[compl_tag % GVE_TX_FILL] = NULL;
 			if ( iobuf )
@@ -1534,60 +1521,77 @@ static int gve_transmit_dqo ( struct net_device *netdev,
 	struct gve_queue *tx = &gve->tx;
 	struct gve_tx_descriptor_dqo *desc;
 	unsigned int index;
-	size_t len;
-	void *buf;
-	uint64_t dma_addr;
+	unsigned int count;
+	size_t frag_len;
+	size_t offset;
+	size_t len = iob_len ( iobuf );
 
 	/* Defer packet if there is no space in the transmit ring */
+	if (gve_is_qpl(gve)) {
+		count = ( ( len + GVE_BUF_SIZE - 1 ) / GVE_BUF_SIZE );
+	} else {
+		count = 1; // RDA, single fragment
+	}
 
-	// TODO: prawal, write this condition for QPL 
-	if ( ( tx->prod - tx->cons ) >= tx->fill ) {
-		/* Ring is full, try to free some space */
-		gve_poll_tx_dqo ( netdev );
-		if ( ( tx->prod - tx->cons ) >= tx->fill )
-			netdev_tx_defer ( netdev, iobuf );
+	if ( ( tx->prod - tx->cons + count ) > tx->fill ) {
+		netdev_tx_defer ( netdev, iobuf );
 		return 0;
 	}
 
-	// TODO: copy the loop from gqi code, descide the frag_len based on if QPL or RDA 
-	// OR
-	// TODO: write two if functions, one for QPL and one for RDA
-
-	/* Get buffer and DMA address */
-	len = iob_len ( iobuf );
 	if ( gve_is_qpl(gve) ) {
-		// TODO: this is totally wrong
-		buf = gve_buffer ( tx, tx->prod );
-		dma_addr = dma ( &tx->qpl.map, buf );
-		memcpy ( buf, iobuf->data, len );
+		for ( offset = 0 ; offset < len ; offset += frag_len ) {
+
+			/* Copy packet to queue pages */
+			frag_len = ( len - offset );
+			if ( frag_len > GVE_BUF_SIZE )
+				frag_len = GVE_BUF_SIZE;
+			memcpy ( gve_buffer ( tx, tx->prod ),
+				 ( iobuf->data + offset ), frag_len );
+
+			/* Populate descriptor */
+			index = ( tx->prod & ( tx->count - 1 ) );
+			desc = &tx->desc.dqo_tx_desc[index];
+			memset ( desc, 0, sizeof ( *desc ) );
+			desc->buf_addr = cpu_to_le64 ( gve_address ( tx, tx->prod ) );
+			desc->dtype = 0xc;
+			desc->end_of_packet = (frag_len == ( len - offset )) ? 0x1 : 0x0;
+			desc->checksum_offload_enable = 0x0;
+			desc->report_event = 0x1;
+			desc->compl_tag = cpu_to_le16 ( tx->prod );
+			desc->buf_size = frag_len;
+			DBGC ( gve, "GVE %p TX %#04x len %#04zx at %#08llx tag %#04x\n",
+				gve, index, len, le64_to_cpu ( desc->buf_addr ),
+				le16_to_cpu ( desc->compl_tag ) );
+
+			usleep ( 1 );
+
+			tx->prod++;
+		}
 	} else {
-		buf = iobuf->data;
-		dma_addr = iob_dma ( iobuf );
+		/* Populate descriptor */
+		index = ( tx->prod & ( tx->count - 1 ) );
+		desc = &tx->desc.dqo_tx_desc[index];
+		memset ( desc, 0, sizeof ( *desc ) );
+		desc->buf_addr = cpu_to_le64 ( iob_dma ( iobuf ) );
+		desc->dtype = 0xc;
+		desc->end_of_packet = 0x1;
+		desc->checksum_offload_enable = 0x0;
+		desc->report_event = 0x1;
+		desc->compl_tag = cpu_to_le16 ( tx->prod );
+		desc->buf_size = len;
+		DBGC ( gve, "GVE %p TX %#04x len %#04zx at %#08llx tag %#04x\n",
+			gve, index, len, le64_to_cpu ( desc->buf_addr ),
+			le16_to_cpu ( desc->compl_tag ) );
+
+		// TODO: this is a hack to get it working, sleep for 1us
+		usleep ( 1 );
+
+		tx->prod++;
 	}
 
-	/* Populate descriptor */
-	index = ( tx->prod & ( tx->count - 1 ) );
-	desc = &tx->desc.dqo_tx_desc[index];
-	memset ( desc, 0, sizeof ( *desc ) );
-	desc->buf_addr = cpu_to_le64 ( dma_addr );
-	desc->dtype = 0xc;
-	desc->end_of_packet = 0x1;
-	desc->checksum_offload_enable = 0x0;
-	desc->report_event = 0x1;
-	desc->compl_tag = cpu_to_le16 ( tx->prod );
-	desc->buf_size =  len;
-	DBGC ( gve, "GVE %p TX %#04x len %#04zx at %#08llx tag %#04x\n",
-		gve, index, len, le64_to_cpu ( desc->buf_addr ),
-		le16_to_cpu ( desc->compl_tag ) );
+	/* Record I/O buffer against the final descriptor */
+	gve->tx_iobuf[ (tx->prod - 1U) % GVE_TX_FILL ] = iobuf;
 
-	// TODO: this is a hack to get it working, sleep for 1us
-	usleep ( 1 );
-
-	/* Record I/O buffer against descriptor */
-	gve->tx_iobuf[ tx->prod % GVE_TX_FILL ] = iobuf;
-
-	/* Ring doorbell */
-	tx->prod++;
 	wmb();
 	writel ( cpu_to_le32(tx->prod), tx->db );
 
@@ -1730,10 +1734,11 @@ static void gve_poll_rx_gq ( struct net_device *netdev ) {
 static void gve_poll_rx_dqo ( struct net_device *netdev ) {
 	struct gve_nic *gve = netdev->priv;
 	struct gve_queue *rx = &gve->rx;
-	struct gve_rx_completion_dqo *cmplt;
-	struct io_buffer *iobuf = NULL; 
+	struct gve_rx_completion_dqo *cmplt; 
+	struct io_buffer *iobuf = NULL;
 	unsigned int index;
 	size_t len;
+	void *data;
 	int rc;
 
 	/* Process receive completions */
@@ -1760,43 +1765,34 @@ static void gve_poll_rx_dqo ( struct net_device *netdev ) {
 		DBGC ( gve, "GVE %p RX %#04x len %#04zx id %#04x\n", 
 				gve, index, len, cmplt->buf_id );
 
-		/* Sanity check */
-		if ( len > GVE_PAGE_SIZE ) {
-			rc = -EIO;
-			netdev_rx_err ( netdev, NULL, rc );
-			// Move the consumer index forward
-			rx->cons++;
-			/* Advance consumer index */
-			rx->cmptl_counter++;
-			if ( ( rx->cmptl_counter & ( rx->count - 1 ) ) == 0 )
-				rx->cur_gen_bit ^= 1;
-			continue;
-		}
-
 		/* Allocate and populate I/O buffer */
 		if ( cmplt->rx_error == 0 ) {
 			iobuf = alloc_iob ( len );
 			if ( ! iobuf ) {
 				rc = -ENOMEM;
 				netdev_rx_err ( netdev, NULL, rc );
+				goto advance_counter;
 			}
-			assert ( iob_tailroom ( iobuf ) >= len );
-			assert(rx->desc.dqo_rx_buf[index].buf_id == cmplt->buf_id);
 
-			/* Copy data */
-			memcpy ( iob_put ( iobuf, len ), (void *)(le64_to_cpu(rx->desc.dqo_rx_buf[index].buf_addr)), len );
+			if ( gve_is_qpl ( gve ) ) {
+				data = gve_buffer ( rx, cmplt->buf_id );
+				memcpy ( iob_put ( iobuf, len ), data, len );
+			} else {
+				data = (void *)le64_to_cpu ( rx->desc.dqo_rx_buf[index].buf_addr );
+				memcpy ( iob_put ( iobuf, len ), data, len );
+				/* deallocate buffer TODO: prawal use pre allocation */
+				dma_ufree ( &rx->rxbuf_map[index], data, GVE_PAGE_SIZE );
+			}
 
-			/* Hand off packet to network stack */
-			netdev_rx ( netdev, iobuf );
+			if ( iobuf )
+				netdev_rx ( netdev, iobuf );
 		} else {
 			DBGC( gve, "GVE %p RX error status: %#04x\n", gve, cmplt->status_error1);
 			rc = -EIO;
 			netdev_rx_err ( netdev, NULL, rc );
 		}
 
-		/* deallocate buffer TODO: prawal: just use QPL here */
-		dma_ufree ( &rx->rxbuf_map[index], (void *)(le64_to_cpu(rx->desc.dqo_rx_buf[index].buf_addr)), GVE_PAGE_SIZE );
-
+advance_counter:
 		// Move the consumer index forward
 		rx->cons++;
 
@@ -1847,18 +1843,23 @@ static void gve_refill_rx_dqo ( struct net_device *netdev ) {
 		index = ( rx->prod & ( rx->count - 1 ) );
 		DBGC( gve, "GVE %p RX refill %#04x/%#04x index %#04x\n", gve, rx->cons, rx->prod, index);
 		desc = &rx->desc.dqo_rx_buf[index];
-		memset ( desc, 0, sizeof ( *desc ) );
+		memset ( desc, 0, sizeof(*desc));
 
-		// Allocate a new buffer
-		// TODO: prawal pre-allocate buffers and use a similar logic as QPL 
-		// TODO: add support for QPL as well
-		size_t buf_size = GVE_PAGE_SIZE;
-		void *buf = dma_umalloc ( gve->dma, &rx->rxbuf_map[index], buf_size, GVE_ALIGN );
-		desc->buf_addr = cpu_to_le64 ( dma ( &rx->rxbuf_map[index], buf ) );
-		desc->buf_id = cpu_to_le16 ( rx->prod );
+		if (gve_is_qpl(gve)) {
+			desc->buf_addr = cpu_to_le64(gve_address(rx, index));
+		} else {
+			/* Allocate a new buffer */
+			// TODO: prawal pre-allocate buffers and use a similar logic as QPL 
+			void *buf = dma_umalloc(gve->dma, &rx->rxbuf_map[index],
+						  GVE_PAGE_SIZE, GVE_ALIGN);
+			desc->buf_addr = cpu_to_le64(dma(&rx->rxbuf_map[index], buf));
+		}
+		desc->buf_id = cpu_to_le16(rx->prod);
 		rx->prod++;
+
+		/* Advance producer index */
 		wmb();
-		writel ( cpu_to_le32( rx->prod ), rx->db );
+		writel ( cpu_to_le32 ( rx->prod ), rx->db );
 	}
 }
 
