@@ -538,12 +538,21 @@ struct gve_qpl {
 	unsigned int id;
 };
 
+struct gve_packet {
+	/** Page addresses */
+	void *data;
+	/** Page mapping */
+	struct dma_mapping map;
+	/** Number of pages */
+	unsigned int count;
+};
+
 /**
  * Maximum number of transmit buffers
  *
  * This is a policy decision.
  */
-#define GVE_TX_FILL 8
+#define GVE_TX_FILL 16
 
 /** Transmit queue page list ID */
 #define GVE_TX_QPL 0x18ae5458
@@ -789,6 +798,14 @@ struct gve_queue {
 		void *raw;
 	} cmplt;
 
+	/** Buffer for data packets */
+	union {
+		/** Queue page list */
+		struct gve_qpl qpl;
+		/** Buffer for RDA Rx data packets */
+		struct gve_packet rx_buf;
+	} buffer;
+
 	/** Queue resources */
 	struct gve_resources *res;
 
@@ -821,9 +838,6 @@ struct gve_queue {
 	/* Tracks the current gen bit of compl_q */
 	uint8_t cur_gen_bit;
 	uint32_t cmptl_counter;
-
-	/** Queue page list */
-	struct gve_qpl qpl;
 };
 
 /** A descriptor queue type */

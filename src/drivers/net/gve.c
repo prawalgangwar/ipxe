@@ -927,7 +927,30 @@ static inline __attribute__ (( always_inline )) void *
 gve_buffer ( struct gve_queue *queue, unsigned int index ) {
 
 	/* Pages are currently allocated as a single contiguous block */
-	return ( queue->qpl.data + gve_address ( queue, index ) );
+	return ( queue->buffer.qpl.data + gve_address ( queue, index ) );
+}
+
+/**
+ * Allocate RDA receive buffer
+ *
+ * @v gve		GVE device
+ * @v packet		Packet buffer
+ * @v buffers		Number of data buffers
+ * @ret rc		Return status code
+ */
+static int gve_alloc_rx_buf ( struct gve_nic *gve, struct gve_packet *packet,
+			      unsigned int buffers ) {
+	size_t len;
+
+	/* Calculate number of pages required */
+	packet->count = ( ( buffers + GVE_BUF_PER_PAGE - 1 ) / GVE_BUF_PER_PAGE );
+
+	/* Allocate pages (as a single block) */
+	len = ( packet->count * GVE_PAGE_SIZE );
+	packet->data = dma_umalloc ( gve->dma, &packet->map, len, GVE_ALIGN );
+	if ( ! packet->data )
+		return -ENOMEM;
+	return 0;
 }
 
 /**
@@ -999,10 +1022,16 @@ static int gve_alloc_queue ( struct gve_nic *gve, struct gve_queue *queue ) {
 
 	/* Allocate queue page list if not using RDA */
 	if ( gve_is_qpl(gve) ) {
-		rc = gve_alloc_qpl ( gve, &queue->qpl, type->qpl,
+		rc = gve_alloc_qpl ( gve, &queue->buffer.qpl, type->qpl,
 					    queue->fill );
 		if ( rc != 0 )
-			goto err_qpl;
+			goto err_buffer;
+	}
+	else if (strcmp(type->name, "RX") == 0) {
+		DBGC ( gve, "GVE %p RX using RDA buffers\n", gve );
+		rc = gve_alloc_rx_buf ( gve, &queue->buffer.rx_buf, queue->fill );
+		if ( rc != 0 )
+			goto err_buffer;
 	}
 
 	/* Allocate descriptors */
@@ -1058,8 +1087,11 @@ static int gve_alloc_queue ( struct gve_nic *gve, struct gve_queue *queue ) {
 	dma_ufree ( &queue->desc_map, queue->desc.raw, desc_len );
  err_desc:
 	if ( gve_is_qpl(gve) )
-		gve_free_qpl ( &queue->qpl );
- err_qpl:
+		gve_free_qpl ( &queue->buffer.qpl );
+	else if (strcmp(type->name, "RX") == 0)
+		dma_ufree ( &queue->buffer.rx_buf.map, queue->buffer.rx_buf.data,
+			    queue->buffer.rx_buf.count * GVE_PAGE_SIZE );
+ err_buffer:
  err_sanity:
 	return rc;
 }
@@ -1095,8 +1127,12 @@ static void gve_free_queue ( struct gve_nic *gve, struct gve_queue *queue ) {
 	dma_ufree ( &queue->desc_map, queue->desc.raw, desc_len );
 
 	/* Free queue page list if not using RDA */
-	if ( gve_is_qpl(gve) )
-		gve_free_qpl ( &queue->qpl );
+	if ( gve_is_qpl(gve) ) {
+		gve_free_qpl ( &queue->buffer.qpl );
+	} else if (strcmp(type->name, "RX") == 0) {
+		dma_ufree ( &queue->buffer.rx_buf.map, queue->buffer.rx_buf.data,
+			    queue->buffer.rx_buf.count * GVE_PAGE_SIZE );
+	}
 }
 
 /**
@@ -1138,9 +1174,9 @@ static int gve_start ( struct gve_nic *gve ) {
 
 	/* Register queue page lists if not using RDA */
 	if ( gve_is_qpl(gve) ) {
-		if ( ( rc = gve_register ( gve, &tx->qpl ) ) != 0 )
+		if ( ( rc = gve_register ( gve, &tx->buffer.qpl ) ) != 0 )
 			goto err_register_tx;
-		if ( ( rc = gve_register ( gve, &rx->qpl ) ) != 0 )
+		if ( ( rc = gve_register ( gve, &rx->buffer.qpl ) ) != 0 )
 			goto err_register_rx;
 	}
 
@@ -1159,10 +1195,10 @@ static int gve_start ( struct gve_nic *gve ) {
 	gve_destroy_queue ( gve, tx );
  err_create_tx:
 	if ( gve_is_qpl(gve) )
-		gve_unregister ( gve, &rx->qpl );
+		gve_unregister ( gve, &rx->buffer.qpl );
  err_register_rx:
 	if ( gve_is_qpl(gve) )
-		gve_unregister ( gve, &tx->qpl );
+		gve_unregister ( gve, &tx->buffer.qpl );
  err_register_tx:
 	gve_deconfigure ( gve );
  err_configure:
@@ -1184,8 +1220,8 @@ static void gve_stop ( struct gve_nic *gve ) {
 
 	/* Unregister page lists if not using RDA */
 	if ( gve_is_qpl(gve) ) {
-		gve_unregister ( gve, &rx->qpl );
-		gve_unregister ( gve, &tx->qpl );
+		gve_unregister ( gve, &rx->buffer.qpl );
+		gve_unregister ( gve, &tx->buffer.qpl );
 	}
 
 	/* Deconfigure device */
@@ -1534,7 +1570,10 @@ static int gve_transmit_dqo ( struct net_device *netdev,
 	}
 
 	if ( ( tx->prod - tx->cons + count ) > tx->fill ) {
-		netdev_tx_defer ( netdev, iobuf );
+		// try to free up completions
+		gve_poll_tx_dqo ( netdev );
+		if ( ( tx->prod - tx->cons + count ) > tx->fill )
+			netdev_tx_defer ( netdev, iobuf );
 		return 0;
 	}
 
@@ -1563,8 +1602,6 @@ static int gve_transmit_dqo ( struct net_device *netdev,
 				gve, index, len, le64_to_cpu ( desc->buf_addr ),
 				le16_to_cpu ( desc->compl_tag ) );
 
-			usleep ( 1 );
-
 			tx->prod++;
 		}
 	} else {
@@ -1582,9 +1619,6 @@ static int gve_transmit_dqo ( struct net_device *netdev,
 		DBGC ( gve, "GVE %p TX %#04x len %#04zx at %#08llx tag %#04x\n",
 			gve, index, len, le64_to_cpu ( desc->buf_addr ),
 			le16_to_cpu ( desc->compl_tag ) );
-
-		// TODO: this is a hack to get it working, sleep for 1us
-		usleep ( 1 );
 
 		tx->prod++;
 	}
@@ -1746,7 +1780,6 @@ static void gve_poll_rx_dqo ( struct net_device *netdev ) {
 	// TODO: prawal, add QPL handling as well
 	while ( 1 ) {
 		/* Never exceed the producer index */
-		// TODO: prawal, check how to handle this
 		if ( rx->cons >= rx->prod ) {
 			break;
 		}
@@ -1780,8 +1813,6 @@ static void gve_poll_rx_dqo ( struct net_device *netdev ) {
 			} else {
 				data = (void *)le64_to_cpu ( rx->desc.dqo_rx_buf[index].buf_addr );
 				memcpy ( iob_put ( iobuf, len ), data, len );
-				/* deallocate buffer TODO: prawal use pre allocation */
-				dma_ufree ( &rx->rxbuf_map[index], data, GVE_PAGE_SIZE );
 			}
 
 			if ( iobuf )
@@ -1849,10 +1880,7 @@ static void gve_refill_rx_dqo ( struct net_device *netdev ) {
 			desc->buf_addr = cpu_to_le64(gve_address(rx, index));
 		} else {
 			/* Allocate a new buffer */
-			// TODO: prawal pre-allocate buffers and use a similar logic as QPL 
-			void *buf = dma_umalloc(gve->dma, &rx->rxbuf_map[index],
-						  GVE_PAGE_SIZE, GVE_ALIGN);
-			desc->buf_addr = cpu_to_le64(dma(&rx->rxbuf_map[index], buf));
+			desc->buf_addr = cpu_to_le64(dma(&rx->buffer.rx_buf.map, rx->buffer.rx_buf.data + gve_address(rx, index)));
 		}
 		desc->buf_id = cpu_to_le16(rx->prod);
 		rx->prod++;
