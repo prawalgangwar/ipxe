@@ -892,7 +892,8 @@ static int gve_alloc_qpl ( struct gve_nic *gve, struct gve_qpl *qpl,
  * @v gve		GVE device
  * @v qpl		Queue page list
  */
-static void gve_free_qpl ( struct gve_qpl *qpl ) {
+static void gve_free_qpl ( struct gve_nic *nic __unused,
+			   struct gve_qpl *qpl ) {
 	size_t len = ( qpl->count * GVE_PAGE_SIZE );
 
 	/* Free pages */
@@ -943,14 +944,34 @@ static int gve_alloc_rx_buf ( struct gve_nic *gve, struct gve_packet *packet,
 	size_t len;
 
 	/* Calculate number of pages required */
+	build_assert ( GVE_BUF_SIZE <= GVE_PAGE_SIZE );
 	packet->count = ( ( buffers + GVE_BUF_PER_PAGE - 1 ) / GVE_BUF_PER_PAGE );
+	assert ( packet->count <= GVE_QPL_MAX );
 
 	/* Allocate pages (as a single block) */
 	len = ( packet->count * GVE_PAGE_SIZE );
 	packet->data = dma_umalloc ( gve->dma, &packet->map, len, GVE_ALIGN );
 	if ( ! packet->data )
 		return -ENOMEM;
+
+	DBGC ( gve, "GVE %p RX buffers at [%08lx,%08lx)\n",
+	       gve, virt_to_phys ( packet->data ),
+	       ( virt_to_phys ( packet->data ) + len ) );
 	return 0;
+}
+
+
+/** Free RX buffers
+ *
+ * @v gve		GVE device
+ * @v packet		Packet buffer
+ */
+static void gve_free_rx_buf ( struct gve_nic *gve __unused,
+			   struct gve_packet *packet ) {
+	size_t len = ( packet->count * GVE_PAGE_SIZE );
+
+	/* Free pages */
+	dma_ufree ( &packet->map, packet->data, len );
 }
 
 /**
@@ -1087,10 +1108,9 @@ static int gve_alloc_queue ( struct gve_nic *gve, struct gve_queue *queue ) {
 	dma_ufree ( &queue->desc_map, queue->desc.raw, desc_len );
  err_desc:
 	if ( gve_is_qpl(gve) )
-		gve_free_qpl ( &queue->buffer.qpl );
+		gve_free_qpl ( gve, &queue->buffer.qpl );
 	else if (strcmp(type->name, "RX") == 0)
-		dma_ufree ( &queue->buffer.rx_buf.map, queue->buffer.rx_buf.data,
-			    queue->buffer.rx_buf.count * GVE_PAGE_SIZE );
+		gve_free_rx_buf ( gve, &queue->buffer.rx_buf );
  err_buffer:
  err_sanity:
 	return rc;
@@ -1128,10 +1148,9 @@ static void gve_free_queue ( struct gve_nic *gve, struct gve_queue *queue ) {
 
 	/* Free queue page list if not using RDA */
 	if ( gve_is_qpl(gve) ) {
-		gve_free_qpl ( &queue->buffer.qpl );
+		gve_free_qpl ( gve, &queue->buffer.qpl );
 	} else if (strcmp(type->name, "RX") == 0) {
-		dma_ufree ( &queue->buffer.rx_buf.map, queue->buffer.rx_buf.data,
-			    queue->buffer.rx_buf.count * GVE_PAGE_SIZE );
+		gve_free_rx_buf ( gve, &queue->buffer.rx_buf );
 	}
 }
 
