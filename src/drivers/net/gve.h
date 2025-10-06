@@ -740,12 +740,8 @@ struct gve_rx_completion_dqo {
 	uint16_t reserved3;
 
 	uint8_t descriptor_done: 1;
-	uint8_t reserved4: 2;
-	uint8_t l3_l4_processed: 1;
-	uint8_t csum_ip_err: 1;
-	uint8_t csum_l4_err: 1;
-	uint8_t csum_external_ip_err: 1;
-	uint8_t csum_external_udp_err: 1;
+	uint8_t end_of_packet: 1;
+	uint8_t reserved4: 6;
 
 	uint8_t status_error1;
 

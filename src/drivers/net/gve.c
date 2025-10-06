@@ -1761,104 +1761,6 @@ static void gve_poll_rx_gq ( struct net_device *netdev ) {
 }
 
 /**
- * Poll for received packets (DQO)
- *
- * @v netdev		Network device
- */
-static void gve_poll_rx_dqo ( struct net_device *netdev ) {
-	struct gve_nic *gve = netdev->priv;
-	struct gve_queue *rx = &gve->rx;
-	struct gve_rx_completion_dqo *cmplt; 
-	struct io_buffer *iobuf = NULL;
-	unsigned int index;
-	size_t len;
-	void *data;
-	int rc;
-
-	/* Process receive completions */
-	// TODO: prawal, handle packets spanning multiple buffers for RDA
-	// TODO: prawal, add QPL handling as well
-	while ( 1 ) {
-		/* Never exceed the producer index */
-		if ( rx->cons >= rx->prod ) {
-			break;
-		}
-
-		/* Read next possible completion */
-		index = ( rx->cmptl_counter & ( rx->count - 1 ) );
-		cmplt = &rx->cmplt.dqo_rx[index];
-
-		/* Check generation bit */
-		if ( cmplt->generation == rx->cur_gen_bit ) {
-			break;
-		}
-
-		/* Parse completion */
-		len = ( le16_to_cpu ( cmplt->packet_len ));
-		DBGC ( gve, "GVE %p RX %#04x len %#04zx id %#04x\n", 
-				gve, index, len, cmplt->buf_id );
-
-		/* Allocate and populate I/O buffer */
-		if ( cmplt->rx_error == 0 ) {
-			iobuf = alloc_iob ( len );
-			if ( ! iobuf ) {
-				rc = -ENOMEM;
-				netdev_rx_err ( netdev, NULL, rc );
-				goto advance_counter;
-			}
-
-			if ( gve_is_qpl ( gve ) ) {
-				data = gve_buffer ( rx, cmplt->buf_id );
-				memcpy ( iob_put ( iobuf, len ), data, len );
-			} else {
-				data = (void *)le64_to_cpu ( rx->desc.dqo_rx_buf[index].buf_addr );
-				memcpy ( iob_put ( iobuf, len ), data, len );
-			}
-
-			if ( iobuf )
-				netdev_rx ( netdev, iobuf );
-		} else {
-			DBGC( gve, "GVE %p RX error status: %#04x\n", gve, cmplt->status_error1);
-			rc = -EIO;
-			netdev_rx_err ( netdev, NULL, rc );
-		}
-
-advance_counter:
-		// Move the consumer index forward
-		rx->cons++;
-
-		/* Advance consumer index */
-		rx->cmptl_counter++;
-		if ( ( rx->cmptl_counter & ( rx->count - 1 ) ) == 0 )
-			rx->cur_gen_bit ^= 1;
-	}
-}
-
-/**
- * Refill receive queue (GQ)
- *
- * @v netdev		Network device
- */
-static void gve_refill_rx_gq ( struct net_device *netdev ) {
-	struct gve_nic *gve = netdev->priv;
-	struct gve_queue *rx = &gve->rx;
-	unsigned int prod;
-
-	/* The receive descriptors are prepopulated at the time of
-	 * creating the receive queue (pointing to the preallocated
-	 * queue pages).  Refilling is therefore just a case of
-	 * ringing the doorbell if the device is not yet aware of any
-	 * available descriptors.
-	 */
-	prod = ( rx->cons + rx->fill );
-	if ( prod != rx->prod ) {
-		rx->prod = prod;
-		writel ( bswap_32 ( prod ), rx->db );
-		DBGC2 ( gve, "GVE %p RX %#04x ready\n", gve, rx->prod );
-	}
-}
-
-/**
  * Refill receive queue (DQO)
  *
  * @v netdev		Network device
@@ -1888,6 +1790,126 @@ static void gve_refill_rx_dqo ( struct net_device *netdev ) {
 		/* Advance producer index */
 		wmb();
 		writel ( cpu_to_le32 ( rx->prod ), rx->db );
+	}
+}
+
+/**
+ * Poll for received packets (DQO)
+ *
+ * @v netdev		Network device
+ */
+static void gve_poll_rx_dqo ( struct net_device *netdev ) {
+	struct gve_nic *gve = netdev->priv;
+	struct gve_queue *rx = &gve->rx;
+	struct gve_rx_completion_dqo *cmplt; 
+	struct io_buffer *iobuf = NULL;
+	unsigned int index;
+	uint32_t cons;
+	size_t total;
+	size_t len;
+	void *data;
+	int rc;
+
+	/* Process receive completions */
+	cons = rx->cons;
+	total = 0;
+	while ( 1 ) {
+		/* Never exceed the producer index */
+		if ( cons >= rx->prod ) {
+			// Add more buffers if possible
+			gve_refill_rx_dqo ( netdev );
+			if ( cons >= rx->prod )
+			break;
+		}
+
+		/* Read next possible completion */
+		index = ( rx->cmptl_counter & ( rx->count - 1 ) );
+		cmplt = &rx->cmplt.dqo_rx[index];
+
+		/* Check generation bit */
+		if ( cmplt->generation == rx->cur_gen_bit ) {
+			break;
+		}
+
+		/* Parse completion */
+		len = ( le16_to_cpu ( cmplt->packet_len ));
+		DBGC ( gve, "GVE %p RX %#04x len %#04zx id %#04x\n", 
+				gve, index, len, cmplt->buf_id );
+
+		if ( cmplt->rx_error != 0 ) {
+			DBGC ( gve, "GVE %p RX error %#04x\n", gve, cmplt->rx_error );
+			total = 0;
+		}
+
+		/* Advance completion queue consumer index */
+		rx->cmptl_counter++;
+		cons++;
+		if ( ( rx->cmptl_counter & ( rx->count - 1 ) ) == 0 )
+			rx->cur_gen_bit ^= 1;
+
+		/* Accumulate a complete packet */
+		total += len;
+		if ( cmplt->end_of_packet == 0 ) {
+			continue;
+		}
+
+		/* Allocate and populate I/O buffer */
+		iobuf = ( total ? alloc_iob ( total ) : NULL );
+		for ( ; rx->cons != cons ; rx->cons++ ) {
+			/* Re-read completion length */
+			index = ( rx->cons & ( rx->count - 1 ) );
+			cmplt = &rx->cmplt.dqo_rx[index];
+			len = ( le16_to_cpu ( cmplt->packet_len ));
+
+			if ( !iobuf ) {
+				continue;
+			}
+
+			/* Copy data */
+			if ( gve_is_qpl ( gve ) ) {
+				data = gve_buffer ( rx, cmplt->buf_id );
+				memcpy ( iob_put ( iobuf, len ), data, len );
+			} else {
+				data = (void *)le64_to_cpu ( rx->desc.dqo_rx_buf[index].buf_addr );
+				memcpy ( iob_put ( iobuf, len ), data, len );
+			}
+		}
+		assert ( ( iobuf == NULL ) || ( iob_len ( iobuf ) == total ) );
+		total = 0;
+
+		/* Hand off packet to network stack */
+		if ( iobuf )
+			netdev_rx ( netdev, iobuf );
+		else {
+			rc = -ENOMEM;
+			netdev_rx_err ( netdev, NULL, rc );
+		}
+
+		total = 0;
+	}
+}
+
+/**
+ * Refill receive queue (GQ)
+ *
+ * @v netdev		Network device
+ */
+static void gve_refill_rx_gq ( struct net_device *netdev ) {
+	struct gve_nic *gve = netdev->priv;
+	struct gve_queue *rx = &gve->rx;
+	unsigned int prod;
+
+	/* The receive descriptors are prepopulated at the time of
+	 * creating the receive queue (pointing to the preallocated
+	 * queue pages).  Refilling is therefore just a case of
+	 * ringing the doorbell if the device is not yet aware of any
+	 * available descriptors.
+	 */
+	prod = ( rx->cons + rx->fill );
+	if ( prod != rx->prod ) {
+		rx->prod = prod;
+		writel ( bswap_32 ( prod ), rx->db );
+		DBGC2 ( gve, "GVE %p RX %#04x ready\n", gve, rx->prod );
 	}
 }
 
